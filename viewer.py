@@ -16,6 +16,9 @@ from json import load as json_load
 from signal import signal, SIGUSR1, SIGUSR2
 import logging
 import sh
+import os
+import pifacedigitalio
+import syslog
 
 from settings import settings
 import html_templates
@@ -27,8 +30,12 @@ SPLASH_DELAY = 60  # secs
 EMPTY_PL_DELAY = 5  # secs
 
 BLACK_PAGE = '/tmp/screenly_html/black_page.html'
+ALARM_PAGE = '/home/pi/screenly_assets/alarm_page.html'
 WATCHDOG_PATH = '/tmp/screenly.watchdog'
+WATCHDOG_ALARM_PATH = '/run/shm/screenly.watchdog.alarm'
 SCREENLY_HTML = '/tmp/screenly_html/'
+ALARM_SCREEN = '/screenly_assets/Alarm-stop.jpg'
+ALARM_SCREEN_TEST = '/screenly_assets/138b7aa2a6c34132a9f815e9440c7def'
 LOAD_SCREEN = '/screenly/loading.jpg'  # relative to $HOME
 UZBLRC = '/screenly/misc/uzbl.rc'  # relative to $HOME
 INTRO = '/screenly/intro-template.html'
@@ -36,8 +43,12 @@ INTRO = '/screenly/intro-template.html'
 current_browser_url = None
 browser = None
 
-VIDEO_TIMEOUT = 20  # secs
+VIDEO_TIMEOUT=20  # secs
 
+# Alarm vars:
+alarm_status=False
+ALARM_DELAY=15
+CURRENT_ALARM_DELAY=ALARM_DELAY
 
 def sigusr1(signum, frame):
     """
@@ -123,6 +134,13 @@ def watchdog():
     else:
         utime(WATCHDOG_PATH, None)
 
+def watchdog_alarm():
+    global alarm_status
+    """Notify the infinite loop to stop playing"""
+    #alarm_file = os.path.isfile(WATCHDOG_ALARM_PATH)
+    return alarm_status
+    """return True"""
+
 
 def load_browser(url=None):
     global browser, current_browser_url
@@ -176,10 +194,16 @@ def browser_url(url, cb=lambda _: True, force=False):
         logging.info('current url is %s', current_browser_url)
 
 
+def view_alarm(uri):
+    #logging.debug('View alarm.')
+    browser_send('js window.setimg("{0}")'.format(uri), cb=lambda b: 'COMMAND_EXECUTED' in b and 'setimg' in b)
+
 def view_image(uri):
     browser_clear()
     browser_send('js window.setimg("{0}")'.format(uri), cb=lambda b: 'COMMAND_EXECUTED' in b and 'setimg' in b)
 
+def alarm_page(force=False):
+    load_browser(url='file://' + ALARM_PAGE)
 
 def view_video(uri, duration):
     logging.debug('Displaying video %s for %s ', uri, duration)
@@ -264,7 +288,8 @@ def pro_init():
         with open(status_path, 'rb') as status_file:
             status = json_load(status_file)
 
-        browser_send('js showIpMac("%s", "%s")' % (status.get('ip', ''), status.get('mac', '')))
+        browser_send('js showIpMac("%s", "%s")' %
+            (status.get('ip', ''), status.get('mac', '')) )
 
         if status.get('neterror', False):
             browser_send('js showNetError()')
@@ -306,7 +331,14 @@ def asset_loop(scheduler):
         if 'image' in mime or 'web' in mime:
             duration = int(asset['duration'])
             logging.info('Sleeping for %s', duration)
-            sleep(duration)
+            #sleep(duration)
+
+            for t in range(duration * 10):
+                if watchdog_alarm() is not True:
+                    sleep(0.1)
+                else:
+                    logging.debug("Breaking asset_loop.")
+                    break
     else:
         logging.info('Asset %s at %s is not available, skipping.', asset['name'], asset['uri'])
         sleep(0.5)
@@ -326,6 +358,21 @@ def setup():
     sh.mkdir(SCREENLY_HTML, p=True)
     html_templates.black_page(BLACK_PAGE)
 
+
+def alarm_trigger(event):
+    global alarm_status, CURRENT_ALARM_DELAY
+
+    logging.debug('alarm_trigger: executed')
+    if watchdog_alarm():
+        logging.debug("Already in alarm mode, just adding more time. CURRENT_ALARM_DELAY=%s", CURRENT_ALARM_DELAY)
+        if CURRENT_ALARM_DELAY <= 10: CURRENT_ALARM_DELAY+=10
+        logging.debug("New CURRENT_ALARM_DELAY=%s", CURRENT_ALARM_DELAY)
+
+    else:
+        # Touch Alarm file to trigger alarm:
+        alarm_status=True
+        os.system('touch ' + WATCHDOG_ALARM_PATH )
+        event.chip.leds[0].turn_on()
 
 def wait_for_splash_page(url):
     max_retries = 20
@@ -355,9 +402,46 @@ def main():
         load_browser(url=url)
 
     scheduler = Scheduler()
+
+    pifacedigital = pifacedigitalio.PiFaceDigital()
+    listener = pifacedigitalio.InputEventListener(chip=pifacedigital)
+    listener.register(0, pifacedigitalio.IODIR_FALLING_EDGE, alarm_trigger)
+    listener.activate()
+
+    global alarm_status, CURRENT_ALARM_DELAY
+
     logging.debug('Entering infinite loop.')
     while True:
-        asset_loop(scheduler)
+        if watchdog_alarm() is not True:
+            logging.debug('IN SCREENLY')
+            asset_loop(scheduler)
+
+        else:
+            logging.debug('+++ Entering alarm mode +++')
+            #view_alarm(HOME + ALARM_SCREEN)
+
+            alarm_url=('file://' + ALARM_PAGE)
+            browser_url(url=alarm_url)
+
+            while CURRENT_ALARM_DELAY > 0:
+                sleep(1)
+                CURRENT_ALARM_DELAY-= 1
+
+            # Exit Alarm Mode:
+            syslog.syslog(syslog.LOG_WARNING, 'PARC_ALARM: triggered')
+            pifacedigital.leds[0].turn_off()
+            logging.debug('+++ Exit alarm mode +++')
+
+            # Try removing the watchdog file:
+            try:
+                os.remove(WATCHDOG_ALARM_PATH)
+            except:
+                pass
+
+            alarm_status=False
+
+            # Reset ALARM_DELAY
+            CURRENT_ALARM_DELAY=ALARM_DELAY
 
 
 if __name__ == "__main__":
