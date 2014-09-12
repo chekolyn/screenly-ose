@@ -30,7 +30,7 @@ SPLASH_DELAY = 60  # secs
 EMPTY_PL_DELAY = 5  # secs
 
 BLACK_PAGE = '/tmp/screenly_html/black_page.html'
-ALARM_PAGE = '/home/pi/screenly_assets/alarm_page.html'
+ALARM_PAGE = '/home/pi/screenly/static/page/alarm_page.html'
 WATCHDOG_PATH = '/tmp/screenly.watchdog'
 WATCHDOG_ALARM_PATH = '/run/shm/screenly.watchdog.alarm'
 SCREENLY_HTML = '/tmp/screenly_html/'
@@ -46,9 +46,9 @@ browser = None
 VIDEO_TIMEOUT=20  # secs
 
 # Alarm vars:
-alarm_status=False
 ALARM_DELAY=15
-CURRENT_ALARM_DELAY=ALARM_DELAY
+alarm_status=False
+active_alarm_delay=ALARM_DELAY
 
 def sigusr1(signum, frame):
     """
@@ -360,16 +360,17 @@ def setup():
 
 
 def alarm_trigger(event):
-    global alarm_status, CURRENT_ALARM_DELAY
+    global alarm_status, active_alarm_delay
 
     logging.debug('alarm_trigger: executed')
+
     if watchdog_alarm():
-        logging.debug("Already in alarm mode, just adding more time. CURRENT_ALARM_DELAY=%s", CURRENT_ALARM_DELAY)
-        if CURRENT_ALARM_DELAY <= 10: CURRENT_ALARM_DELAY+=10
-        logging.debug("New CURRENT_ALARM_DELAY=%s", CURRENT_ALARM_DELAY)
+        logging.debug("Already in alarm mode, just adding more time. active_alarm_delay=%s", active_alarm_delay)
+        if active_alarm_delay <= 10: active_alarm_delay+=10
+        logging.debug("New active_alarm_delay=%s", active_alarm_delay)
 
     else:
-        # Touch Alarm file to trigger alarm:
+        # Trigger alarm:
         alarm_status=True
         os.system('touch ' + WATCHDOG_ALARM_PATH )
         event.chip.leds[0].turn_on()
@@ -408,7 +409,7 @@ def main():
     listener.register(0, pifacedigitalio.IODIR_FALLING_EDGE, alarm_trigger)
     listener.activate()
 
-    global alarm_status, CURRENT_ALARM_DELAY
+    global alarm_status, active_alarm_delay
 
     logging.debug('Entering infinite loop.')
     while True:
@@ -418,30 +419,25 @@ def main():
 
         else:
             logging.debug('+++ Entering alarm mode +++')
-            #view_alarm(HOME + ALARM_SCREEN)
+            syslog.syslog(syslog.LOG_WARNING, 'PARC_ALARM: triggered')
 
+            # Show Alarm page:
             alarm_url=('file://' + ALARM_PAGE)
             browser_url(url=alarm_url)
 
-            while CURRENT_ALARM_DELAY > 0:
+            while active_alarm_delay > 0:
                 sleep(1)
-                CURRENT_ALARM_DELAY-= 1
+                active_alarm_delay-= 1
 
             # Exit Alarm Mode:
-            syslog.syslog(syslog.LOG_WARNING, 'PARC_ALARM: triggered')
             pifacedigital.leds[0].turn_off()
             logging.debug('+++ Exit alarm mode +++')
 
-            # Try removing the watchdog file:
-            try:
-                os.remove(WATCHDOG_ALARM_PATH)
-            except:
-                pass
-
+            # Reset alarm status
             alarm_status=False
 
             # Reset ALARM_DELAY
-            CURRENT_ALARM_DELAY=ALARM_DELAY
+            active_alarm_delay=ALARM_DELAY
 
 
 if __name__ == "__main__":
