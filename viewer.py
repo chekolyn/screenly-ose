@@ -406,7 +406,8 @@ def main():
 
     pifacedigital = pifacedigitalio.PiFaceDigital()
     listener = pifacedigitalio.InputEventListener(chip=pifacedigital)
-    listener.register(0, pifacedigitalio.IODIR_FALLING_EDGE, alarm_trigger)
+    #listener.register(0, pifacedigitalio.IODIR_FALLING_EDGE, alarm_trigger)
+    listener.register(0, pifacedigitalio.IODIR_RISING_EDGE, alarm_trigger)
     listener.activate()
 
     global alarm_status, active_alarm_delay
